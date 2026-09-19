@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1789590684810,
+      "tag": "0000_safe_anita_blake",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1789590810219,
+      "tag": "0001_shallow_bloodaxe",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1789592775742,
+      "tag": "0002_hesitant_riptide",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1789699256406,
+      "tag": "0003_talented_dormammu",
+      "breakpoints": true
+    }
+  ]
+}
