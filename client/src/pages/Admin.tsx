@@ -46,17 +46,37 @@ export default function Admin() {
 
   async function handleImageFile(file: File) {
     if (!file.type.match(/^image\/(jpeg|png|webp)$/)) { toast.error("Elige una imagen JPG, PNG o WEBP."); return; }
-    if (file.size > 8 * 1024 * 1024) { toast.error("La imagen no puede superar 8 MB."); return; }
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        const data = String(reader.result);
-        const result = await uploadImage.mutateAsync({ fileName: file.name, contentType: file.type as "image/jpeg" | "image/png" | "image/webp", data });
-        setForm(current => current ? { ...current, imageUrl: result.url } : current);
-        toast.success("Imagen cargada correctamente.");
-      } catch { toast.error("No pudimos subir la imagen."); }
-    };
-    reader.readAsDataURL(file);
+    if (file.size > 12 * 1024 * 1024) { toast.error("La imagen no puede superar 12 MB."); return; }
+    try {
+      const data = await compressImage(file);
+      const result = await uploadImage.mutateAsync({ fileName: `${file.name.replace(/\.[^.]+$/, "")}.jpg`, contentType: "image/jpeg", data });
+      setForm(current => current ? { ...current, imageUrl: result.url } : current);
+      toast.success("Imagen cargada correctamente. Pulsa Guardar producto para aplicar el cambio.");
+    } catch { toast.error("No pudimos cargar la imagen. Prueba con JPG, PNG o WEBP."); }
+  }
+
+  function compressImage(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("No se pudo leer la imagen."));
+      reader.onload = () => {
+        const image = new Image();
+        image.onerror = () => reject(new Error("La imagen no es válida."));
+        image.onload = () => {
+          const maxSide = 1600;
+          const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+          canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
+          const output = canvas.toDataURL("image/jpeg", 0.82);
+          if (output.length > 3_500_000) reject(new Error("La imagen comprimida es demasiado grande."));
+          else resolve(output);
+        };
+        image.src = String(reader.result);
+      };
+      reader.readAsDataURL(file);
+    });
   }
 
   async function removeProduct(product: typeof products[number]) {

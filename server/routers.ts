@@ -121,8 +121,17 @@ export const appRouter = router({
       const base64 = input.data.split(",")[1] ?? "";
       const bytes = Buffer.from(base64, "base64");
       if (bytes.length > 8 * 1024 * 1024) throw new TRPCError({ code: "PAYLOAD_TOO_LARGE", message: "La imagen no puede superar 8 MB." });
-      const result = await storagePut(`panex-products/${Date.now()}-${input.fileName.replace(/[^a-zA-Z0-9._-]/g, "-")}`, bytes, input.contentType);
-      return { url: result.url };
+      try {
+        const result = await storagePut(`panex-products/${Date.now()}-${input.fileName.replace(/[^a-zA-Z0-9._-]/g, "-")}`, bytes, input.contentType);
+        return { url: result.url };
+      } catch (error) {
+        // Vercel puede no tener disponibles las credenciales del storage de Manus.
+        // La imagen ya viene comprimida desde el navegador; conservarla como data
+        // URL permite que el administrador cambie fotos sin perder el producto.
+        console.warn("[Storage] External upload failed; using database fallback", error instanceof Error ? error.message : error);
+        if (input.data.length > 3_500_000) throw new TRPCError({ code: "PAYLOAD_TOO_LARGE", message: "La imagen comprimida es demasiado grande." });
+        return { url: input.data };
+      }
     }),
   }),
   orders: router({
