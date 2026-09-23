@@ -108,7 +108,7 @@
   body { @apply bg-background text-foreground; font-family: "DM Sans", sans-serif; }
   h1, h2, h3, h4, .font-display { font-family: "Playfair Display", serif; }
   button:not(:disabled), [role="button"]:not([aria-disabled="true"]), [type="button"]:not(:disabled), [type="submit"]:not(:disabled), a[href], select:not(:disabled), input:not(:disabled), textarea:not(:disabled) { @apply cursor-pointer; }
-  ::selection { background: #f0bf7a; color: #30251f; }
+  ::selection { background: #cac9c7; color: #30251f; }
 }
 
 @layer components {
