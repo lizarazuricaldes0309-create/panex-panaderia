@@ -119,6 +119,15 @@ async function issueVerification(account: typeof customerAccounts.$inferSelect) 
   await sendVerificationEmail(account.email, account.name, code);
 }
 
+async function activateWithoutEmail(account: typeof customerAccounts.$inferSelect) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  await db.update(customerAccounts).set({ emailVerified: true, verificationCodeHash: null, verificationExpiresAt: null, verificationAttempts: 0, loyaltyPoints: 100, welcomeCouponCode: couponCode() }).where(eq(customerAccounts.id, account.id));
+  const activated = (await db.select().from(customerAccounts).where(eq(customerAccounts.id, account.id)).limit(1))[0];
+  if (!activated) throw new Error("No se pudo activar la cuenta.");
+  return { customer: publicCustomer(activated), token: await createSession(activated.id) };
+}
+
 export async function registerCustomer(input: { name: string; email: string; phone?: string; password: string }) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -126,6 +135,10 @@ export async function registerCustomer(input: { name: string; email: string; pho
   const existing = (await db.select().from(customerAccounts).where(eq(customerAccounts.email, email)).limit(1))[0];
   if (existing) {
     if (existing.emailVerified) throw new Error("Ya existe una cuenta con ese correo.");
+    if (!ENV.resendApiKey || !ENV.resendFromEmail) {
+      const activated = await activateWithoutEmail(existing);
+      return { requiresVerification: false as const, email, ...activated };
+    }
     await issueVerification(existing);
     return { requiresVerification: true as const, email };
   }
@@ -134,10 +147,15 @@ export async function registerCustomer(input: { name: string; email: string; pho
   if (!id) throw new Error("No se pudo crear la cuenta.");
   const account = (await db.select().from(customerAccounts).where(eq(customerAccounts.id, id)).limit(1))[0];
   if (!account) throw new Error("No se pudo crear la cuenta.");
+  if (!ENV.resendApiKey || !ENV.resendFromEmail) {
+    const activated = await activateWithoutEmail(account);
+    return { requiresVerification: false as const, email, ...activated };
+  }
   try {
     await issueVerification(account);
   } catch (error) {
-    await db.delete(customerAccounts).where(eq(customerAccounts.id, id));
+    // Conservamos la cuenta aunque el proveedor de correo falle. El cliente
+    // puede corregir la configuración y solicitar el código nuevamente.
     throw error;
   }
   return { requiresVerification: true as const, email };

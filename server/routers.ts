@@ -47,6 +47,7 @@ export const appRouter = router({
     })).mutation(async ({ ctx, input }) => {
       try {
         const result = await registerCustomer(input);
+        if ("token" in result && result.token) setCustomerCookie(ctx.res, ctx.req, result.token);
         return result;
       } catch (error) {
         const message = error instanceof Error ? error.message : "No se pudo crear la cuenta.";

@@ -10,7 +10,7 @@ export default function CustomerAuth() {
   const [mode, setMode] = useState<"login" | "register" | "verify">("login");
   const [form, setForm] = useState({ name: "", email: "", phone: "", password: "", confirmPassword: "", code: "" });
   const login = trpc.customers.login.useMutation({ onSuccess: customer => { utils.customers.me.setData(undefined, customer); toast.success(`Qué gusto verte, ${customer.name.split(" ")[0]}.`); } });
-  const register = trpc.customers.register.useMutation({ onSuccess: result => { setForm(current => ({ ...current, email: result.email, code: "" })); setMode("verify"); toast.success("Te enviamos un código de 6 dígitos. Revisa tu correo."); } });
+  const register = trpc.customers.register.useMutation({ onSuccess: result => { if (result.requiresVerification) { setForm(current => ({ ...current, email: result.email, code: "" })); setMode("verify"); toast.success("Te enviamos un código de 6 dígitos. Revisa tu correo."); } else { utils.customers.me.setData(undefined, result.customer); setMode("login"); toast.success("Cuenta creada y guardada correctamente. Ya puedes comprar en Panex."); } } });
   const verifyEmail = trpc.customers.verifyEmail.useMutation({ onSuccess: customer => { utils.customers.me.setData(undefined, customer); toast.success("Correo verificado. Ganaste 100 puntos y un cupón de bienvenida."); } });
   const resendVerification = trpc.customers.resendVerification.useMutation({ onSuccess: () => toast.success("Enviamos un código nuevo a tu correo.") });
   const logout = trpc.customers.logout.useMutation({ onSuccess: () => { utils.customers.me.setData(undefined, null); toast.success("Sesión cerrada correctamente."); } });
