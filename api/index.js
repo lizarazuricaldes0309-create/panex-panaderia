@@ -753,52 +753,6 @@ var systemRouter = router({
   })
 });
 
-// server/storage.ts
-function getForgeConfig() {
-  const forgeUrl = ENV.forgeApiUrl;
-  const forgeKey = ENV.forgeApiKey;
-  if (!forgeUrl || !forgeKey) {
-    throw new Error(
-      "Storage config missing: set BUILT_IN_FORGE_API_URL and BUILT_IN_FORGE_API_KEY"
-    );
-  }
-  return { forgeUrl: forgeUrl.replace(/\/+$/, ""), forgeKey };
-}
-function normalizeKey(relKey) {
-  return relKey.replace(/^\/+/, "");
-}
-function appendHashSuffix(relKey) {
-  const hash = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
-  const lastDot = relKey.lastIndexOf(".");
-  if (lastDot === -1) return `${relKey}_${hash}`;
-  return `${relKey.slice(0, lastDot)}_${hash}${relKey.slice(lastDot)}`;
-}
-async function storagePut(relKey, data, contentType = "application/octet-stream") {
-  const { forgeUrl, forgeKey } = getForgeConfig();
-  const key = appendHashSuffix(normalizeKey(relKey));
-  const presignUrl = new URL("v1/storage/presign/put", forgeUrl + "/");
-  presignUrl.searchParams.set("path", key);
-  const presignResp = await fetch(presignUrl, {
-    headers: { Authorization: `Bearer ${forgeKey}` }
-  });
-  if (!presignResp.ok) {
-    const msg = await presignResp.text().catch(() => presignResp.statusText);
-    throw new Error(`Storage presign failed (${presignResp.status}): ${msg}`);
-  }
-  const { url: s3Url } = await presignResp.json();
-  if (!s3Url) throw new Error("Forge returned empty presign URL");
-  const blob = typeof data === "string" ? new Blob([data], { type: contentType }) : new Blob([data], { type: contentType });
-  const uploadResp = await fetch(s3Url, {
-    method: "PUT",
-    headers: { "Content-Type": contentType },
-    body: blob
-  });
-  if (!uploadResp.ok) {
-    throw new Error(`Storage upload to S3 failed (${uploadResp.status})`);
-  }
-  return { key, url: `/manus-storage/${key}` };
-}
-
 // server/customerAuth.ts
 import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
 import { and as and2, eq as eq2, gt } from "drizzle-orm";
@@ -1147,14 +1101,8 @@ var appRouter = router({
       const base64 = input.data.split(",")[1] ?? "";
       const bytes = Buffer.from(base64, "base64");
       if (bytes.length > 8 * 1024 * 1024) throw new TRPCError3({ code: "PAYLOAD_TOO_LARGE", message: "La imagen no puede superar 8 MB." });
-      try {
-        const result = await storagePut(`panex-products/${Date.now()}-${input.fileName.replace(/[^a-zA-Z0-9._-]/g, "-")}`, bytes, input.contentType);
-        return { url: result.url };
-      } catch (error) {
-        console.warn("[Storage] External upload failed; using database fallback", error instanceof Error ? error.message : error);
-        if (input.data.length > 35e5) throw new TRPCError3({ code: "PAYLOAD_TOO_LARGE", message: "La imagen comprimida es demasiado grande." });
-        return { url: input.data };
-      }
+      if (input.data.length > 35e5) throw new TRPCError3({ code: "PAYLOAD_TOO_LARGE", message: "La imagen comprimida es demasiado grande." });
+      return { url: input.data };
     })
   }),
   orders: router({
