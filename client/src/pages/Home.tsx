@@ -144,7 +144,7 @@ export default function Home() {
         <div className="container flex h-[76px] items-center justify-between gap-5">
           <a href="#inicio" className="flex items-center gap-3" aria-label="Panex inicio">
             <span className="grid h-11 w-11 place-items-center rounded-full bg-[#a64b2a] text-xl text-[#fffaf4] shadow-sm">✦</span>
-            <span className="leading-none"><span className="block font-display text-2xl font-bold tracking-tight text-[#6e3824]">Pan</span><span className="mt-1 block text-[10px] font-bold uppercase tracking-[0.2em] text-[#a88975]">panadería</span></span>
+            <span className="leading-none"><span className="block font-display text-2xl font-bold tracking-tight text-[#6e3824]">Pane</span><span className="mt-1 block text-[10px] font-bold uppercase tracking-[0.2em] text-[#a88975]">pana</span></span>
           </a>
           <nav className="hidden items-center gap-8 text-sm font-semibold text-[#6e5b4e] md:flex">
             <a href="#catalogo" className="hover:text-[#a64b2a]">Catálogo</a>
