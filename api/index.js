@@ -4,6 +4,7 @@ import "dotenv/config";
 // server/_core/app.ts
 import express from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
+import { SignJWT as SignJWT2 } from "jose";
 
 // shared/const.ts
 var COOKIE_NAME = "app_session_id";
@@ -127,6 +128,7 @@ var ENV = {
   oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
   ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
   ownerEmail: (process.env.OWNER_EMAIL ?? "lizarazuricaldes0309@gmail.com").trim().toLowerCase(),
+  adminPassword: process.env.ADMIN_PASSWORD ?? "",
   isProduction: process.env.NODE_ENV === "production",
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
@@ -1147,25 +1149,53 @@ var appRouter = router({
 });
 
 // server/_core/context.ts
-async function createContext(opts) {
-  let user = null;
+import { parse as parseCookieHeader3 } from "cookie";
+import { jwtVerify as jwtVerify2 } from "jose";
+var ADMIN_COOKIE = "panex_admin_session";
+async function authenticateAdminCookie(cookieHeader) {
+  if (!cookieHeader || !ENV.cookieSecret) return null;
+  const token = parseCookieHeader3(cookieHeader)[ADMIN_COOKIE];
+  if (!token) return null;
   try {
-    user = await sdk.authenticateRequest(opts.req);
-  } catch (error) {
-    user = null;
+    const { payload } = await jwtVerify2(token, new TextEncoder().encode(ENV.cookieSecret), { algorithms: ["HS256"] });
+    if (payload.type !== "panex-admin") return null;
+    return { id: "00000000-0000-0000-0000-000000000001", openId: "panex-password-admin", name: "Administrador Panex", email: ENV.ownerEmail, loginMethod: "password", role: "admin", createdAt: /* @__PURE__ */ new Date(0), updatedAt: /* @__PURE__ */ new Date(), lastSignedIn: /* @__PURE__ */ new Date() };
+  } catch {
+    return null;
   }
-  return {
-    req: opts.req,
-    res: opts.res,
-    user
-  };
+}
+async function createContext(opts) {
+  let user = await authenticateAdminCookie(opts.req.headers.cookie);
+  if (!user) {
+    try {
+      user = await sdk.authenticateRequest(opts.req);
+    } catch {
+      user = null;
+    }
+  }
+  return { req: opts.req, res: opts.res, user };
 }
 
 // server/_core/app.ts
+var ADMIN_COOKIE2 = "panex_admin_session";
 function createApiApp() {
   const app2 = express();
   app2.use(express.json({ limit: "50mb" }));
   app2.use(express.urlencoded({ limit: "50mb", extended: true }));
+  app2.post("/api/admin/login", async (req, res) => {
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    if (!ENV.adminPassword || !ENV.cookieSecret || password !== ENV.adminPassword) {
+      res.status(401).json({ error: "Contrase\xF1a incorrecta" });
+      return;
+    }
+    const token = await new SignJWT2({ type: "panex-admin" }).setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("12h").sign(new TextEncoder().encode(ENV.cookieSecret));
+    res.cookie(ADMIN_COOKIE2, token, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: 12 * 60 * 60 * 1e3 });
+    res.json({ ok: true });
+  });
+  app2.post("/api/admin/logout", (_req, res) => {
+    res.clearCookie(ADMIN_COOKIE2, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/" });
+    res.json({ ok: true });
+  });
   registerStorageProxy(app2);
   registerOAuthRoutes(app2);
   app2.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
