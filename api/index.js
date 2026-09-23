@@ -889,6 +889,14 @@ async function issueVerification(account) {
   await db.update(customerAccounts).set({ verificationCodeHash: tokenHash(code), verificationExpiresAt: verificationExpiry(), verificationAttempts: 0 }).where(eq2(customerAccounts.id, account.id));
   await sendVerificationEmail(account.email, account.name, code);
 }
+async function activateWithoutEmail(account) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  await db.update(customerAccounts).set({ emailVerified: true, verificationCodeHash: null, verificationExpiresAt: null, verificationAttempts: 0, loyaltyPoints: 100, welcomeCouponCode: couponCode() }).where(eq2(customerAccounts.id, account.id));
+  const activated = (await db.select().from(customerAccounts).where(eq2(customerAccounts.id, account.id)).limit(1))[0];
+  if (!activated) throw new Error("No se pudo activar la cuenta.");
+  return { customer: publicCustomer(activated), token: await createSession(activated.id) };
+}
 async function registerCustomer(input) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -896,6 +904,10 @@ async function registerCustomer(input) {
   const existing = (await db.select().from(customerAccounts).where(eq2(customerAccounts.email, email)).limit(1))[0];
   if (existing) {
     if (existing.emailVerified) throw new Error("Ya existe una cuenta con ese correo.");
+    if (!ENV.resendApiKey || !ENV.resendFromEmail) {
+      const activated = await activateWithoutEmail(existing);
+      return { requiresVerification: false, email, ...activated };
+    }
     await issueVerification(existing);
     return { requiresVerification: true, email };
   }
@@ -904,10 +916,13 @@ async function registerCustomer(input) {
   if (!id) throw new Error("No se pudo crear la cuenta.");
   const account = (await db.select().from(customerAccounts).where(eq2(customerAccounts.id, id)).limit(1))[0];
   if (!account) throw new Error("No se pudo crear la cuenta.");
+  if (!ENV.resendApiKey || !ENV.resendFromEmail) {
+    const activated = await activateWithoutEmail(account);
+    return { requiresVerification: false, email, ...activated };
+  }
   try {
     await issueVerification(account);
   } catch (error) {
-    await db.delete(customerAccounts).where(eq2(customerAccounts.id, id));
     throw error;
   }
   return { requiresVerification: true, email };
@@ -1046,6 +1061,7 @@ var appRouter = router({
     })).mutation(async ({ ctx, input }) => {
       try {
         const result = await registerCustomer(input);
+        if ("token" in result && result.token) setCustomerCookie(ctx.res, ctx.req, result.token);
         return result;
       } catch (error) {
         const message = error instanceof Error ? error.message : "No se pudo crear la cuenta.";
