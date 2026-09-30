@@ -205,7 +205,7 @@ export default function Home() {
   );
 }
 
-type AccountCustomer = { id: string; name: string; email: string; emailVerified: boolean };
+type AccountCustomer = { id: string; name: string; email: string | null; emailVerified: boolean; phoneVerified?: boolean };
 
 function ReviewModal({ product, customer, onClose }: { product: Product; customer: AccountCustomer | null | undefined; onClose: () => void }) {
   const utils = trpc.useUtils();

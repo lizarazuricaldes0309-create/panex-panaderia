@@ -6,7 +6,7 @@ import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { ENV } from "./_core/env";
 import { createCustomerReview, deleteProductById, getActiveProducts, getAllOrders, getAllProducts, getReviewsByProduct, insertOrder, insertProduct, updateProductById } from "./db";
-import { clearCustomerCookie, deleteCustomerByAdmin, getCustomerFromRequest, listCustomers, loginCustomer, logoutCustomer, registerCustomer, resendVerification, setCustomerCookie, updateCustomerByAdmin, verifyCustomerEmail } from "./customerAuth";
+import { clearCustomerCookie, deleteCustomerByAdmin, getCustomerFromRequest, listCustomers, loginCustomer, logoutCustomer, registerCustomer, resendPhoneVerification, resendVerification, setCustomerCookie, updateCustomerByAdmin, verifyCustomerEmail, verifyCustomerPhone } from "./customerAuth";
 
 const productInput = z.object({
   name: z.string().min(2),
@@ -40,13 +40,13 @@ export const appRouter = router({
     me: publicProcedure.query(({ ctx }) => getCustomerFromRequest(ctx.req)),
     register: publicProcedure.input(z.object({
       name: z.string().trim().min(2).max(160),
-      email: z.string().trim().email().max(320),
+      email: z.string().trim().email().max(320).optional(),
       phone: z.string().trim().min(7).max(40).optional(),
       password: z.string().min(8).max(128),
-    })).mutation(async ({ ctx, input }) => {
+    }).refine(input => Boolean(input.email || input.phone), { message: "Escribe un correo o un teléfono." })).mutation(async ({ ctx, input }) => {
       try {
         const result = await registerCustomer(input);
-        if ("token" in result && result.token) setCustomerCookie(ctx.res, ctx.req, result.token);
+        if ("token" in result && typeof result.token === "string") setCustomerCookie(ctx.res, ctx.req, result.token);
         return result;
       } catch (error) {
         const message = error instanceof Error ? error.message : "No se pudo crear la cuenta.";
@@ -66,12 +66,24 @@ export const appRouter = router({
       try { return await resendVerification(input.email); }
       catch (error) { throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo reenviar el código." }); }
     }),
+    verifyPhone: publicProcedure.input(z.object({ phone: z.string().trim().min(7).max(40), code: z.string().regex(/^\d{6}$/) })).mutation(async ({ ctx, input }) => {
+      try {
+        const result = await verifyCustomerPhone(input.phone, input.code);
+        setCustomerCookie(ctx.res, ctx.req, result.token);
+        return result.customer;
+      } catch (error) { throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo verificar el teléfono." }); }
+    }),
+    resendPhoneVerification: publicProcedure.input(z.object({ phone: z.string().trim().min(7).max(40) })).mutation(async ({ input }) => {
+      try { return await resendPhoneVerification(input.phone); }
+      catch (error) { throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo reenviar el código SMS." }); }
+    }),
     login: publicProcedure.input(z.object({
-      email: z.string().trim().email().max(320),
+      method: z.enum(["email", "phone"]),
+      identifier: z.string().trim().min(7).max(320),
       password: z.string().min(8).max(128),
     })).mutation(async ({ ctx, input }) => {
       try {
-        const result = await loginCustomer(input.email, input.password);
+        const result = await loginCustomer(input.identifier, input.password, input.method);
         setCustomerCookie(ctx.res, ctx.req, result.token);
         return result.customer;
       } catch (error) {
@@ -85,7 +97,7 @@ export const appRouter = router({
       return { success: true } as const;
     }),
     adminList: adminProcedure.query(() => listCustomers()),
-    adminUpdate: adminProcedure.input(z.object({ id: z.string().uuid(), name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(320), phone: z.string().trim().min(7).max(40).optional(), password: z.string().min(8).max(128).optional() })).mutation(async ({ input }) => {
+    adminUpdate: adminProcedure.input(z.object({ id: z.string().uuid(), name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(320).optional(), phone: z.string().trim().min(7).max(40).optional(), password: z.string().min(8).max(128).optional() })).mutation(async ({ input }) => {
       try { return await updateCustomerByAdmin(input); }
       catch (error) { throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo actualizar el cliente." }); }
     }),

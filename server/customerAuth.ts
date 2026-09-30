@@ -13,9 +13,10 @@ const MAX_VERIFICATION_ATTEMPTS = 5;
 type PublicCustomer = {
   id: string;
   name: string;
-  email: string;
+  email: string | null;
   phone: string | null;
   emailVerified: boolean;
+  phoneVerified: boolean;
   loyaltyPoints: number;
   welcomeCouponCode: string | null;
   createdAt: Date;
@@ -26,9 +27,10 @@ function publicCustomer(account: typeof customerAccounts.$inferSelect): PublicCu
   return {
     id: account.id,
     name: account.name,
-    email: account.email,
+    email: account.email ?? null,
     phone: account.phone ?? null,
-    emailVerified: Boolean(account.emailVerified),
+    emailVerified: Boolean(account.emailVerified || account.phoneVerified),
+    phoneVerified: Boolean(account.phoneVerified),
     loyaltyPoints: account.loyaltyPoints ?? 0,
     welcomeCouponCode: account.welcomeCouponCode ?? null,
     createdAt: account.createdAt,
@@ -85,6 +87,45 @@ async function sendVerificationEmail(email: string, name: string, code: string) 
   }
 }
 
+export function normalizePhone(input: string) {
+  const raw = input.trim().replace(/[\s().-]/g, "");
+  if (!raw) throw new Error("Escribe un número de teléfono.");
+  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
+  if (raw.startsWith("+")) return raw;
+  if (/^591\d{8}$/.test(raw)) return `+${raw}`;
+  if (/^\d{8}$/.test(raw)) return `+591${raw}`;
+  throw new Error("Usa un número válido, por ejemplo +591 70000000.");
+}
+
+function hasTwilioVerify() {
+  return Boolean(ENV.twilioAccountSid && ENV.twilioAuthToken && ENV.twilioVerifyServiceSid);
+}
+
+async function twilioVerifyRequest(path: string, params: URLSearchParams) {
+  if (!hasTwilioVerify()) throw new Error("La verificación por SMS todavía no está configurada.");
+  const credentials = Buffer.from(`${ENV.twilioAccountSid}:${ENV.twilioAuthToken}`).toString("base64");
+  const response = await fetch(`https://verify.twilio.com/v2/Services/${ENV.twilioVerifyServiceSid}${path}`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${credentials}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString(),
+  });
+  const data = await response.json().catch(() => ({})) as { status?: string; message?: string };
+  if (!response.ok) {
+    console.error("[Twilio Verify] request failed", response.status, data);
+    throw new Error(data.message || "No pudimos enviar o comprobar el código SMS.");
+  }
+  return data;
+}
+
+async function sendPhoneVerification(phone: string) {
+  await twilioVerifyRequest("/Verifications", new URLSearchParams({ To: phone, Channel: "sms" }));
+}
+
+async function verifyPhoneCode(phone: string, code: string) {
+  const result = await twilioVerifyRequest("/VerificationCheck", new URLSearchParams({ To: phone, Code: code }));
+  if (result.status !== "approved") throw new Error("El código SMS no es correcto o ya venció.");
+}
+
 function parseCookie(header: string | undefined, name: string) {
   const value = header?.split(";").map(part => part.trim()).find(part => part.startsWith(`${name}=`));
   return value ? decodeURIComponent(value.slice(name.length + 1)) : null;
@@ -114,6 +155,7 @@ async function createSession(accountId: string) {
 async function issueVerification(account: typeof customerAccounts.$inferSelect) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
+  if (!account.email) throw new Error("Esta cuenta no tiene correo para verificar.");
   const code = verificationCode();
   await db.update(customerAccounts).set({ verificationCodeHash: tokenHash(code), verificationExpiresAt: verificationExpiry(), verificationAttempts: 0 }).where(eq(customerAccounts.id, account.id));
   await sendVerificationEmail(account.email, account.name, code);
@@ -128,37 +170,37 @@ async function activateWithoutEmail(account: typeof customerAccounts.$inferSelec
   return { customer: publicCustomer(activated), token: await createSession(activated.id) };
 }
 
-export async function registerCustomer(input: { name: string; email: string; phone?: string; password: string }) {
+export async function registerCustomer(input: { name: string; email?: string; phone?: string; password: string }) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  const email = input.email.trim().toLowerCase();
-  const existing = (await db.select().from(customerAccounts).where(eq(customerAccounts.email, email)).limit(1))[0];
+  const email = input.email?.trim().toLowerCase() || null;
+  const phone = input.phone ? normalizePhone(input.phone) : null;
+  if (!email && !phone) throw new Error("Regístrate con un correo o un número de teléfono.");
+  const existing = email
+    ? (await db.select().from(customerAccounts).where(eq(customerAccounts.email, email)).limit(1))[0]
+    : (await db.select().from(customerAccounts).where(eq(customerAccounts.phone, phone!)).limit(1))[0];
   if (existing) {
-    if (existing.emailVerified) throw new Error("Ya existe una cuenta con ese correo.");
-    if (!ENV.resendApiKey || !ENV.resendFromEmail) {
-      const activated = await activateWithoutEmail(existing);
-      return { requiresVerification: false as const, email, ...activated };
+    if (existing.emailVerified || existing.phoneVerified) throw new Error(email ? "Ya existe una cuenta con ese correo." : "Ya existe una cuenta con ese teléfono.");
+    if (phone) {
+      await sendPhoneVerification(phone);
+      return { requiresVerification: true as const, verificationMethod: "phone" as const, phone };
     }
+    if (!ENV.resendApiKey || !ENV.resendFromEmail) throw new Error("La verificación por correo no está configurada.");
     await issueVerification(existing);
-    return { requiresVerification: true as const, email };
+    return { requiresVerification: true as const, verificationMethod: "email" as const, email };
   }
-  const result = await db.insert(customerAccounts).values({ name: input.name.trim(), email, phone: input.phone?.trim() || null, passwordHash: hashPassword(input.password), emailVerified: false, verificationAttempts: 0, loyaltyPoints: 0 }).returning({ id: customerAccounts.id });
+  const result = await db.insert(customerAccounts).values({ name: input.name.trim(), email, phone, passwordHash: hashPassword(input.password), emailVerified: false, phoneVerified: false, verificationAttempts: 0, loyaltyPoints: 0 }).returning({ id: customerAccounts.id });
   const id = result[0]?.id;
   if (!id) throw new Error("No se pudo crear la cuenta.");
   const account = (await db.select().from(customerAccounts).where(eq(customerAccounts.id, id)).limit(1))[0];
   if (!account) throw new Error("No se pudo crear la cuenta.");
-  if (!ENV.resendApiKey || !ENV.resendFromEmail) {
-    const activated = await activateWithoutEmail(account);
-    return { requiresVerification: false as const, email, ...activated };
+  if (phone) {
+    await sendPhoneVerification(phone);
+    return { requiresVerification: true as const, verificationMethod: "phone" as const, phone };
   }
-  try {
-    await issueVerification(account);
-  } catch (error) {
-    // Conservamos la cuenta aunque el proveedor de correo falle. El cliente
-    // puede corregir la configuración y solicitar el código nuevamente.
-    throw error;
-  }
-  return { requiresVerification: true as const, email };
+  if (!ENV.resendApiKey || !ENV.resendFromEmail) throw new Error("La verificación por correo no está configurada.");
+  await issueVerification(account);
+  return { requiresVerification: true as const, verificationMethod: "email" as const, email };
 }
 
 export async function verifyCustomerEmail(emailInput: string, code: string) {
@@ -182,6 +224,20 @@ export async function verifyCustomerEmail(emailInput: string, code: string) {
   return { customer: publicCustomer(verified), token: await createSession(verified.id) };
 }
 
+export async function verifyCustomerPhone(phoneInput: string, code: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const phone = normalizePhone(phoneInput);
+  const account = (await db.select().from(customerAccounts).where(eq(customerAccounts.phone, phone)).limit(1))[0];
+  if (!account) throw new Error("No encontramos una cuenta con ese teléfono.");
+  if (account.phoneVerified) throw new Error("Este teléfono ya está verificado. Inicia sesión.");
+  await verifyPhoneCode(phone, code.trim());
+  await db.update(customerAccounts).set({ phoneVerified: true, verificationCodeHash: null, verificationExpiresAt: null, verificationAttempts: 0, loyaltyPoints: 100, welcomeCouponCode: account.welcomeCouponCode ?? couponCode() }).where(eq(customerAccounts.id, account.id));
+  const verified = (await db.select().from(customerAccounts).where(eq(customerAccounts.id, account.id)).limit(1))[0];
+  if (!verified) throw new Error("No se pudo activar la cuenta.");
+  return { customer: publicCustomer(verified), token: await createSession(verified.id) };
+}
+
 export async function resendVerification(emailInput: string) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -193,13 +249,25 @@ export async function resendVerification(emailInput: string) {
   return { sent: true as const };
 }
 
-export async function loginCustomer(emailInput: string, password: string) {
+export async function resendPhoneVerification(phoneInput: string) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  const email = emailInput.trim().toLowerCase();
-  const account = (await db.select().from(customerAccounts).where(eq(customerAccounts.email, email)).limit(1))[0];
-  if (!account || !verifyPassword(password, account.passwordHash)) throw new Error("Correo o contraseña incorrectos.");
-  if (!account.emailVerified) throw new Error("Verifica tu correo antes de iniciar sesión.");
+  const phone = normalizePhone(phoneInput);
+  const account = (await db.select().from(customerAccounts).where(eq(customerAccounts.phone, phone)).limit(1))[0];
+  if (!account) throw new Error("No encontramos una cuenta con ese teléfono.");
+  if (account.phoneVerified) throw new Error("Este teléfono ya está verificado.");
+  await sendPhoneVerification(phone);
+  return { sent: true as const };
+}
+
+export async function loginCustomer(identifierInput: string, password: string, method: "email" | "phone") {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const identifier = method === "email" ? identifierInput.trim().toLowerCase() : normalizePhone(identifierInput);
+  const account = (await db.select().from(customerAccounts).where(method === "email" ? eq(customerAccounts.email, identifier) : eq(customerAccounts.phone, identifier)).limit(1))[0];
+  if (!account || !verifyPassword(password, account.passwordHash)) throw new Error("Datos de acceso incorrectos.");
+  if (method === "email" && !account.emailVerified) throw new Error("Verifica tu correo antes de iniciar sesión.");
+  if (method === "phone" && !account.phoneVerified) throw new Error("Verifica tu teléfono antes de iniciar sesión.");
   await db.update(customerAccounts).set({ lastLoginAt: new Date() }).where(eq(customerAccounts.id, account.id));
   return { customer: publicCustomer({ ...account, lastLoginAt: new Date() }), token: await createSession(account.id) };
 }
@@ -212,7 +280,7 @@ export async function getCustomerFromRequest(req: { headers: { cookie?: string }
   const session = (await db.select().from(customerSessions).where(and(eq(customerSessions.tokenHash, tokenHash(token)), gt(customerSessions.expiresAt, new Date()))).limit(1))[0];
   if (!session) return null;
   const account = (await db.select().from(customerAccounts).where(eq(customerAccounts.id, session.accountId)).limit(1))[0];
-  return account?.emailVerified ? publicCustomer(account) : null;
+  return account && (account.emailVerified || account.phoneVerified) ? publicCustomer(account) : null;
 }
 
 export async function logoutCustomer(req: { headers: { cookie?: string } }) {
@@ -227,19 +295,22 @@ export async function listCustomers() {
   return db.select({ id: customerAccounts.id, name: customerAccounts.name, email: customerAccounts.email, phone: customerAccounts.phone, emailVerified: customerAccounts.emailVerified, loyaltyPoints: customerAccounts.loyaltyPoints, createdAt: customerAccounts.createdAt, lastLoginAt: customerAccounts.lastLoginAt }).from(customerAccounts).orderBy(customerAccounts.createdAt);
 }
 
-export async function updateCustomerByAdmin(input: { id: string; name: string; email: string; phone?: string; password?: string }) {
+export async function updateCustomerByAdmin(input: { id: string; name: string; email?: string; phone?: string; password?: string }) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  const email = input.email.trim().toLowerCase();
+  const email = input.email?.trim().toLowerCase() || null;
+  const phone = input.phone?.trim() ? normalizePhone(input.phone) : null;
   const account = (await db.select().from(customerAccounts).where(eq(customerAccounts.id, input.id)).limit(1))[0];
   if (!account) throw new Error("Cliente no encontrado.");
-  const duplicate = (await db.select({ id: customerAccounts.id }).from(customerAccounts).where(eq(customerAccounts.email, email)).limit(1))[0];
+  const duplicate = email ? (await db.select({ id: customerAccounts.id }).from(customerAccounts).where(eq(customerAccounts.email, email)).limit(1))[0] : undefined;
   if (duplicate && duplicate.id !== input.id) throw new Error("Ese correo ya pertenece a otra cuenta.");
+  const phoneDuplicate = phone ? (await db.select({ id: customerAccounts.id }).from(customerAccounts).where(eq(customerAccounts.phone, phone)).limit(1))[0] : undefined;
+  if (phoneDuplicate && phoneDuplicate.id !== input.id) throw new Error("Ese teléfono ya pertenece a otra cuenta.");
   const emailChanged = email !== account.email;
   const values: Partial<typeof customerAccounts.$inferInsert> = {
     name: input.name.trim(),
     email,
-    phone: input.phone?.trim() || null,
+    phone,
   };
   if (input.password?.trim()) values.passwordHash = hashPassword(input.password.trim());
   if (emailChanged) {
@@ -248,10 +319,11 @@ export async function updateCustomerByAdmin(input: { id: string; name: string; e
     values.verificationExpiresAt = null;
     values.verificationAttempts = 0;
   }
+  if (phone !== account.phone) values.phoneVerified = false;
   await db.update(customerAccounts).set(values).where(eq(customerAccounts.id, input.id));
   const updated = (await db.select().from(customerAccounts).where(eq(customerAccounts.id, input.id)).limit(1))[0];
   if (!updated) throw new Error("No se pudo actualizar el cliente.");
-  if (emailChanged) await issueVerification(updated);
+  if (emailChanged && email && ENV.resendApiKey && ENV.resendFromEmail) await issueVerification(updated);
   return publicCustomer(updated);
 }
 

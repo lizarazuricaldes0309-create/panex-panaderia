@@ -54,10 +54,11 @@ export const orders = pgTable("orders", {
 export const customerAccounts = pgTable("panex_customer_accounts", {
   id: uuid("id").defaultRandom().primaryKey(),
   name: text("name").notNull(),
-  email: text("email").notNull().unique(),
-  phone: text("phone"),
+  email: text("email").unique(),
+  phone: text("phone").unique(),
   passwordHash: text("password_hash").notNull(),
   emailVerified: boolean("email_verified").default(false).notNull(),
+  phoneVerified: boolean("phone_verified").default(false).notNull(),
   verificationCodeHash: text("verification_code_hash"),
   verificationExpiresAt: timestamp("verification_expires_at", { withTimezone: true }),
   verificationAttempts: integer("verification_attempts").default(0).notNull(),

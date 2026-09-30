@@ -1,7 +1,5 @@
 // api/index.ts
 import "dotenv/config";
-
-// server/_core/app.ts
 import express from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { SignJWT as SignJWT2 } from "jose";
@@ -88,10 +86,11 @@ var orders = pgTable("orders", {
 var customerAccounts = pgTable("panex_customer_accounts", {
   id: uuid("id").defaultRandom().primaryKey(),
   name: text("name").notNull(),
-  email: text("email").notNull().unique(),
-  phone: text("phone"),
+  email: text("email").unique(),
+  phone: text("phone").unique(),
   passwordHash: text("password_hash").notNull(),
   emailVerified: boolean("email_verified").default(false).notNull(),
+  phoneVerified: boolean("phone_verified").default(false).notNull(),
   verificationCodeHash: text("verification_code_hash"),
   verificationExpiresAt: timestamp("verification_expires_at", { withTimezone: true }),
   verificationAttempts: integer("verification_attempts").default(0).notNull(),
@@ -133,7 +132,10 @@ var ENV = {
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
   resendApiKey: process.env.RESEND_API_KEY ?? "",
-  resendFromEmail: process.env.RESEND_FROM_EMAIL ?? ""
+  resendFromEmail: process.env.RESEND_FROM_EMAIL ?? "",
+  twilioAccountSid: process.env.TWILIO_ACCOUNT_SID ?? "",
+  twilioAuthToken: process.env.TWILIO_AUTH_TOKEN ?? "",
+  twilioVerifyServiceSid: process.env.TWILIO_VERIFY_SERVICE_SID ?? ""
 };
 
 // server/db.ts
@@ -606,6 +608,34 @@ function registerStorageProxy(app2) {
   });
 }
 
+// server/_core/context.ts
+import { parse as parseCookieHeader3 } from "cookie";
+import { jwtVerify as jwtVerify2 } from "jose";
+var ADMIN_COOKIE = "panex_admin_session";
+async function authenticateAdminCookie(cookieHeader) {
+  if (!cookieHeader || !ENV.cookieSecret) return null;
+  const token = parseCookieHeader3(cookieHeader)[ADMIN_COOKIE];
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify2(token, new TextEncoder().encode(ENV.cookieSecret), { algorithms: ["HS256"] });
+    if (payload.type !== "panex-admin") return null;
+    return { id: "00000000-0000-0000-0000-000000000001", openId: "panex-password-admin", name: "Administrador Panex", email: ENV.ownerEmail, loginMethod: "password", role: "admin", createdAt: /* @__PURE__ */ new Date(0), updatedAt: /* @__PURE__ */ new Date(), lastSignedIn: /* @__PURE__ */ new Date() };
+  } catch {
+    return null;
+  }
+}
+async function createContext(opts) {
+  let user = await authenticateAdminCookie(opts.req.headers.cookie);
+  if (!user) {
+    try {
+      user = await sdk.authenticateRequest(opts.req);
+    } catch {
+      user = null;
+    }
+  }
+  return { req: opts.req, res: opts.res, user };
+}
+
 // server/routers.ts
 import { TRPCError as TRPCError3 } from "@trpc/server";
 import { z as z2 } from "zod";
@@ -764,9 +794,10 @@ function publicCustomer(account) {
   return {
     id: account.id,
     name: account.name,
-    email: account.email,
+    email: account.email ?? null,
     phone: account.phone ?? null,
-    emailVerified: Boolean(account.emailVerified),
+    emailVerified: Boolean(account.emailVerified || account.phoneVerified),
+    phoneVerified: Boolean(account.phoneVerified),
     loyaltyPoints: account.loyaltyPoints ?? 0,
     welcomeCouponCode: account.welcomeCouponCode ?? null,
     createdAt: account.createdAt,
@@ -815,6 +846,40 @@ async function sendVerificationEmail(email, name, code) {
     throw new Error("No pudimos enviar el c\xF3digo. Revisa la configuraci\xF3n del correo remitente.");
   }
 }
+function normalizePhone(input) {
+  const raw = input.trim().replace(/[\s().-]/g, "");
+  if (!raw) throw new Error("Escribe un n\xFAmero de tel\xE9fono.");
+  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
+  if (raw.startsWith("+")) return raw;
+  if (/^591\d{8}$/.test(raw)) return `+${raw}`;
+  if (/^\d{8}$/.test(raw)) return `+591${raw}`;
+  throw new Error("Usa un n\xFAmero v\xE1lido, por ejemplo +591 70000000.");
+}
+function hasTwilioVerify() {
+  return Boolean(ENV.twilioAccountSid && ENV.twilioAuthToken && ENV.twilioVerifyServiceSid);
+}
+async function twilioVerifyRequest(path, params) {
+  if (!hasTwilioVerify()) throw new Error("La verificaci\xF3n por SMS todav\xEDa no est\xE1 configurada.");
+  const credentials = Buffer.from(`${ENV.twilioAccountSid}:${ENV.twilioAuthToken}`).toString("base64");
+  const response = await fetch(`https://verify.twilio.com/v2/Services/${ENV.twilioVerifyServiceSid}${path}`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${credentials}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString()
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    console.error("[Twilio Verify] request failed", response.status, data);
+    throw new Error(data.message || "No pudimos enviar o comprobar el c\xF3digo SMS.");
+  }
+  return data;
+}
+async function sendPhoneVerification(phone) {
+  await twilioVerifyRequest("/Verifications", new URLSearchParams({ To: phone, Channel: "sms" }));
+}
+async function verifyPhoneCode(phone, code) {
+  const result = await twilioVerifyRequest("/VerificationCheck", new URLSearchParams({ To: phone, Code: code }));
+  if (result.status !== "approved") throw new Error("El c\xF3digo SMS no es correcto o ya venci\xF3.");
+}
 function parseCookie(header, name) {
   const value = header?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
   return value ? decodeURIComponent(value.slice(name.length + 1)) : null;
@@ -839,47 +904,40 @@ async function createSession(accountId) {
 async function issueVerification(account) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
+  if (!account.email) throw new Error("Esta cuenta no tiene correo para verificar.");
   const code = verificationCode();
   await db.update(customerAccounts).set({ verificationCodeHash: tokenHash(code), verificationExpiresAt: verificationExpiry(), verificationAttempts: 0 }).where(eq2(customerAccounts.id, account.id));
   await sendVerificationEmail(account.email, account.name, code);
 }
-async function activateWithoutEmail(account) {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable");
-  await db.update(customerAccounts).set({ emailVerified: true, verificationCodeHash: null, verificationExpiresAt: null, verificationAttempts: 0, loyaltyPoints: 100, welcomeCouponCode: couponCode() }).where(eq2(customerAccounts.id, account.id));
-  const activated = (await db.select().from(customerAccounts).where(eq2(customerAccounts.id, account.id)).limit(1))[0];
-  if (!activated) throw new Error("No se pudo activar la cuenta.");
-  return { customer: publicCustomer(activated), token: await createSession(activated.id) };
-}
 async function registerCustomer(input) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  const email = input.email.trim().toLowerCase();
-  const existing = (await db.select().from(customerAccounts).where(eq2(customerAccounts.email, email)).limit(1))[0];
+  const email = input.email?.trim().toLowerCase() || null;
+  const phone = input.phone ? normalizePhone(input.phone) : null;
+  if (!email && !phone) throw new Error("Reg\xEDstrate con un correo o un n\xFAmero de tel\xE9fono.");
+  const existing = email ? (await db.select().from(customerAccounts).where(eq2(customerAccounts.email, email)).limit(1))[0] : (await db.select().from(customerAccounts).where(eq2(customerAccounts.phone, phone)).limit(1))[0];
   if (existing) {
-    if (existing.emailVerified) throw new Error("Ya existe una cuenta con ese correo.");
-    if (!ENV.resendApiKey || !ENV.resendFromEmail) {
-      const activated = await activateWithoutEmail(existing);
-      return { requiresVerification: false, email, ...activated };
+    if (existing.emailVerified || existing.phoneVerified) throw new Error(email ? "Ya existe una cuenta con ese correo." : "Ya existe una cuenta con ese tel\xE9fono.");
+    if (phone) {
+      await sendPhoneVerification(phone);
+      return { requiresVerification: true, verificationMethod: "phone", phone };
     }
+    if (!ENV.resendApiKey || !ENV.resendFromEmail) throw new Error("La verificaci\xF3n por correo no est\xE1 configurada.");
     await issueVerification(existing);
-    return { requiresVerification: true, email };
+    return { requiresVerification: true, verificationMethod: "email", email };
   }
-  const result = await db.insert(customerAccounts).values({ name: input.name.trim(), email, phone: input.phone?.trim() || null, passwordHash: hashPassword(input.password), emailVerified: false, verificationAttempts: 0, loyaltyPoints: 0 }).returning({ id: customerAccounts.id });
+  const result = await db.insert(customerAccounts).values({ name: input.name.trim(), email, phone, passwordHash: hashPassword(input.password), emailVerified: false, phoneVerified: false, verificationAttempts: 0, loyaltyPoints: 0 }).returning({ id: customerAccounts.id });
   const id = result[0]?.id;
   if (!id) throw new Error("No se pudo crear la cuenta.");
   const account = (await db.select().from(customerAccounts).where(eq2(customerAccounts.id, id)).limit(1))[0];
   if (!account) throw new Error("No se pudo crear la cuenta.");
-  if (!ENV.resendApiKey || !ENV.resendFromEmail) {
-    const activated = await activateWithoutEmail(account);
-    return { requiresVerification: false, email, ...activated };
+  if (phone) {
+    await sendPhoneVerification(phone);
+    return { requiresVerification: true, verificationMethod: "phone", phone };
   }
-  try {
-    await issueVerification(account);
-  } catch (error) {
-    throw error;
-  }
-  return { requiresVerification: true, email };
+  if (!ENV.resendApiKey || !ENV.resendFromEmail) throw new Error("La verificaci\xF3n por correo no est\xE1 configurada.");
+  await issueVerification(account);
+  return { requiresVerification: true, verificationMethod: "email", email };
 }
 async function verifyCustomerEmail(emailInput, code) {
   const db = await getDb();
@@ -901,6 +959,19 @@ async function verifyCustomerEmail(emailInput, code) {
   if (!verified) throw new Error("No se pudo activar la cuenta.");
   return { customer: publicCustomer(verified), token: await createSession(verified.id) };
 }
+async function verifyCustomerPhone(phoneInput, code) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const phone = normalizePhone(phoneInput);
+  const account = (await db.select().from(customerAccounts).where(eq2(customerAccounts.phone, phone)).limit(1))[0];
+  if (!account) throw new Error("No encontramos una cuenta con ese tel\xE9fono.");
+  if (account.phoneVerified) throw new Error("Este tel\xE9fono ya est\xE1 verificado. Inicia sesi\xF3n.");
+  await verifyPhoneCode(phone, code.trim());
+  await db.update(customerAccounts).set({ phoneVerified: true, verificationCodeHash: null, verificationExpiresAt: null, verificationAttempts: 0, loyaltyPoints: 100, welcomeCouponCode: account.welcomeCouponCode ?? couponCode() }).where(eq2(customerAccounts.id, account.id));
+  const verified = (await db.select().from(customerAccounts).where(eq2(customerAccounts.id, account.id)).limit(1))[0];
+  if (!verified) throw new Error("No se pudo activar la cuenta.");
+  return { customer: publicCustomer(verified), token: await createSession(verified.id) };
+}
 async function resendVerification(emailInput) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -911,13 +982,24 @@ async function resendVerification(emailInput) {
   await issueVerification(account);
   return { sent: true };
 }
-async function loginCustomer(emailInput, password) {
+async function resendPhoneVerification(phoneInput) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  const email = emailInput.trim().toLowerCase();
-  const account = (await db.select().from(customerAccounts).where(eq2(customerAccounts.email, email)).limit(1))[0];
-  if (!account || !verifyPassword(password, account.passwordHash)) throw new Error("Correo o contrase\xF1a incorrectos.");
-  if (!account.emailVerified) throw new Error("Verifica tu correo antes de iniciar sesi\xF3n.");
+  const phone = normalizePhone(phoneInput);
+  const account = (await db.select().from(customerAccounts).where(eq2(customerAccounts.phone, phone)).limit(1))[0];
+  if (!account) throw new Error("No encontramos una cuenta con ese tel\xE9fono.");
+  if (account.phoneVerified) throw new Error("Este tel\xE9fono ya est\xE1 verificado.");
+  await sendPhoneVerification(phone);
+  return { sent: true };
+}
+async function loginCustomer(identifierInput, password, method) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const identifier = method === "email" ? identifierInput.trim().toLowerCase() : normalizePhone(identifierInput);
+  const account = (await db.select().from(customerAccounts).where(method === "email" ? eq2(customerAccounts.email, identifier) : eq2(customerAccounts.phone, identifier)).limit(1))[0];
+  if (!account || !verifyPassword(password, account.passwordHash)) throw new Error("Datos de acceso incorrectos.");
+  if (method === "email" && !account.emailVerified) throw new Error("Verifica tu correo antes de iniciar sesi\xF3n.");
+  if (method === "phone" && !account.phoneVerified) throw new Error("Verifica tu tel\xE9fono antes de iniciar sesi\xF3n.");
   await db.update(customerAccounts).set({ lastLoginAt: /* @__PURE__ */ new Date() }).where(eq2(customerAccounts.id, account.id));
   return { customer: publicCustomer({ ...account, lastLoginAt: /* @__PURE__ */ new Date() }), token: await createSession(account.id) };
 }
@@ -929,7 +1011,7 @@ async function getCustomerFromRequest(req) {
   const session = (await db.select().from(customerSessions).where(and2(eq2(customerSessions.tokenHash, tokenHash(token)), gt(customerSessions.expiresAt, /* @__PURE__ */ new Date()))).limit(1))[0];
   if (!session) return null;
   const account = (await db.select().from(customerAccounts).where(eq2(customerAccounts.id, session.accountId)).limit(1))[0];
-  return account?.emailVerified ? publicCustomer(account) : null;
+  return account && (account.emailVerified || account.phoneVerified) ? publicCustomer(account) : null;
 }
 async function logoutCustomer(req) {
   const token = getCustomerToken(req);
@@ -944,16 +1026,19 @@ async function listCustomers() {
 async function updateCustomerByAdmin(input) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  const email = input.email.trim().toLowerCase();
+  const email = input.email?.trim().toLowerCase() || null;
+  const phone = input.phone?.trim() ? normalizePhone(input.phone) : null;
   const account = (await db.select().from(customerAccounts).where(eq2(customerAccounts.id, input.id)).limit(1))[0];
   if (!account) throw new Error("Cliente no encontrado.");
-  const duplicate = (await db.select({ id: customerAccounts.id }).from(customerAccounts).where(eq2(customerAccounts.email, email)).limit(1))[0];
+  const duplicate = email ? (await db.select({ id: customerAccounts.id }).from(customerAccounts).where(eq2(customerAccounts.email, email)).limit(1))[0] : void 0;
   if (duplicate && duplicate.id !== input.id) throw new Error("Ese correo ya pertenece a otra cuenta.");
+  const phoneDuplicate = phone ? (await db.select({ id: customerAccounts.id }).from(customerAccounts).where(eq2(customerAccounts.phone, phone)).limit(1))[0] : void 0;
+  if (phoneDuplicate && phoneDuplicate.id !== input.id) throw new Error("Ese tel\xE9fono ya pertenece a otra cuenta.");
   const emailChanged = email !== account.email;
   const values = {
     name: input.name.trim(),
     email,
-    phone: input.phone?.trim() || null
+    phone
   };
   if (input.password?.trim()) values.passwordHash = hashPassword(input.password.trim());
   if (emailChanged) {
@@ -962,10 +1047,11 @@ async function updateCustomerByAdmin(input) {
     values.verificationExpiresAt = null;
     values.verificationAttempts = 0;
   }
+  if (phone !== account.phone) values.phoneVerified = false;
   await db.update(customerAccounts).set(values).where(eq2(customerAccounts.id, input.id));
   const updated = (await db.select().from(customerAccounts).where(eq2(customerAccounts.id, input.id)).limit(1))[0];
   if (!updated) throw new Error("No se pudo actualizar el cliente.");
-  if (emailChanged) await issueVerification(updated);
+  if (emailChanged && email && ENV.resendApiKey && ENV.resendFromEmail) await issueVerification(updated);
   return publicCustomer(updated);
 }
 async function deleteCustomerByAdmin(accountId) {
@@ -1009,13 +1095,13 @@ var appRouter = router({
     me: publicProcedure.query(({ ctx }) => getCustomerFromRequest(ctx.req)),
     register: publicProcedure.input(z2.object({
       name: z2.string().trim().min(2).max(160),
-      email: z2.string().trim().email().max(320),
+      email: z2.string().trim().email().max(320).optional(),
       phone: z2.string().trim().min(7).max(40).optional(),
       password: z2.string().min(8).max(128)
-    })).mutation(async ({ ctx, input }) => {
+    }).refine((input) => Boolean(input.email || input.phone), { message: "Escribe un correo o un tel\xE9fono." })).mutation(async ({ ctx, input }) => {
       try {
         const result = await registerCustomer(input);
-        if ("token" in result && result.token) setCustomerCookie(ctx.res, ctx.req, result.token);
+        if ("token" in result && typeof result.token === "string") setCustomerCookie(ctx.res, ctx.req, result.token);
         return result;
       } catch (error) {
         const message = error instanceof Error ? error.message : "No se pudo crear la cuenta.";
@@ -1038,12 +1124,29 @@ var appRouter = router({
         throw new TRPCError3({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo reenviar el c\xF3digo." });
       }
     }),
+    verifyPhone: publicProcedure.input(z2.object({ phone: z2.string().trim().min(7).max(40), code: z2.string().regex(/^\d{6}$/) })).mutation(async ({ ctx, input }) => {
+      try {
+        const result = await verifyCustomerPhone(input.phone, input.code);
+        setCustomerCookie(ctx.res, ctx.req, result.token);
+        return result.customer;
+      } catch (error) {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo verificar el tel\xE9fono." });
+      }
+    }),
+    resendPhoneVerification: publicProcedure.input(z2.object({ phone: z2.string().trim().min(7).max(40) })).mutation(async ({ input }) => {
+      try {
+        return await resendPhoneVerification(input.phone);
+      } catch (error) {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo reenviar el c\xF3digo SMS." });
+      }
+    }),
     login: publicProcedure.input(z2.object({
-      email: z2.string().trim().email().max(320),
+      method: z2.enum(["email", "phone"]),
+      identifier: z2.string().trim().min(7).max(320),
       password: z2.string().min(8).max(128)
     })).mutation(async ({ ctx, input }) => {
       try {
-        const result = await loginCustomer(input.email, input.password);
+        const result = await loginCustomer(input.identifier, input.password, input.method);
         setCustomerCookie(ctx.res, ctx.req, result.token);
         return result.customer;
       } catch (error) {
@@ -1057,7 +1160,7 @@ var appRouter = router({
       return { success: true };
     }),
     adminList: adminProcedure2.query(() => listCustomers()),
-    adminUpdate: adminProcedure2.input(z2.object({ id: z2.string().uuid(), name: z2.string().trim().min(2).max(160), email: z2.string().trim().email().max(320), phone: z2.string().trim().min(7).max(40).optional(), password: z2.string().min(8).max(128).optional() })).mutation(async ({ input }) => {
+    adminUpdate: adminProcedure2.input(z2.object({ id: z2.string().uuid(), name: z2.string().trim().min(2).max(160), email: z2.string().trim().email().max(320).optional(), phone: z2.string().trim().min(7).max(40).optional(), password: z2.string().min(8).max(128).optional() })).mutation(async ({ input }) => {
       try {
         return await updateCustomerByAdmin(input);
       } catch (error) {
@@ -1118,35 +1221,7 @@ var appRouter = router({
   })
 });
 
-// server/_core/context.ts
-import { parse as parseCookieHeader3 } from "cookie";
-import { jwtVerify as jwtVerify2 } from "jose";
-var ADMIN_COOKIE = "panex_admin_session";
-async function authenticateAdminCookie(cookieHeader) {
-  if (!cookieHeader || !ENV.cookieSecret) return null;
-  const token = parseCookieHeader3(cookieHeader)[ADMIN_COOKIE];
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify2(token, new TextEncoder().encode(ENV.cookieSecret), { algorithms: ["HS256"] });
-    if (payload.type !== "panex-admin") return null;
-    return { id: "00000000-0000-0000-0000-000000000001", openId: "panex-password-admin", name: "Administrador Panex", email: ENV.ownerEmail, loginMethod: "password", role: "admin", createdAt: /* @__PURE__ */ new Date(0), updatedAt: /* @__PURE__ */ new Date(), lastSignedIn: /* @__PURE__ */ new Date() };
-  } catch {
-    return null;
-  }
-}
-async function createContext(opts) {
-  let user = await authenticateAdminCookie(opts.req.headers.cookie);
-  if (!user) {
-    try {
-      user = await sdk.authenticateRequest(opts.req);
-    } catch {
-      user = null;
-    }
-  }
-  return { req: opts.req, res: opts.res, user };
-}
-
-// server/_core/app.ts
+// api/index.ts
 var ADMIN_COOKIE2 = "panex_admin_session";
 function createApiApp() {
   const app2 = express();
@@ -1171,8 +1246,6 @@ function createApiApp() {
   app2.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
   return app2;
 }
-
-// api/index.ts
 var app = createApiApp();
 function handler(req, res) {
   process.env.NODE_ENV = "production";
