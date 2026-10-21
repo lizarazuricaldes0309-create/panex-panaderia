@@ -177,6 +177,15 @@ async function activateWithoutEmail(account: typeof customerAccounts.$inferSelec
   return { customer: publicCustomer(activated), token: await createSession(activated.id) };
 }
 
+async function activatePhoneAccount(accountId: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  await db.update(customerAccounts).set({ phoneVerified: true, verificationCodeHash: null, verificationExpiresAt: null, verificationAttempts: 0, loyaltyPoints: 100, welcomeCouponCode: couponCode() }).where(eq(customerAccounts.id, accountId));
+  const activated = (await db.select().from(customerAccounts).where(eq(customerAccounts.id, accountId)).limit(1))[0];
+  if (!activated) throw new Error("No se pudo activar la cuenta.");
+  return { customer: publicCustomer(activated), token: await createSession(activated.id) };
+}
+
 export async function registerCustomer(input: { name: string; email?: string; phone?: string; password: string }) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -188,10 +197,7 @@ export async function registerCustomer(input: { name: string; email?: string; ph
     : (await db.select().from(customerAccounts).where(eq(customerAccounts.phone, phone!)).limit(1))[0];
   if (existing) {
     if (existing.emailVerified || existing.phoneVerified) throw new Error(email ? "Ya existe una cuenta con ese correo." : "Ya existe una cuenta con ese teléfono.");
-    if (phone) {
-      await sendPhoneVerification(phone);
-      return { requiresVerification: true as const, verificationMethod: "phone" as const, phone };
-    }
+    if (phone) return activatePhoneAccount(existing.id);
     if (!ENV.resendApiKey || !ENV.resendFromEmail) throw new Error("La verificación por correo no está configurada.");
     await issueVerification(existing);
     return { requiresVerification: true as const, verificationMethod: "email" as const, email };
@@ -201,10 +207,7 @@ export async function registerCustomer(input: { name: string; email?: string; ph
   if (!id) throw new Error("No se pudo crear la cuenta.");
   const account = (await db.select().from(customerAccounts).where(eq(customerAccounts.id, id)).limit(1))[0];
   if (!account) throw new Error("No se pudo crear la cuenta.");
-  if (phone) {
-    await sendPhoneVerification(phone);
-    return { requiresVerification: true as const, verificationMethod: "phone" as const, phone };
-  }
+  if (phone) return activatePhoneAccount(account.id);
   if (!ENV.resendApiKey || !ENV.resendFromEmail) throw new Error("La verificación por correo no está configurada.");
   await issueVerification(account);
   return { requiresVerification: true as const, verificationMethod: "email" as const, email };
