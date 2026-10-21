@@ -112,8 +112,8 @@ export async function getReviewsByProduct(productId: string) {
 export async function createCustomerReview(accountId: string, productId: string, rating: number, comment: string) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  const account = (await db.select({ id: customerAccounts.id, name: customerAccounts.name, emailVerified: customerAccounts.emailVerified }).from(customerAccounts).where(eq(customerAccounts.id, accountId)).limit(1))[0];
-  if (!account?.emailVerified) throw new Error("Verifica tu correo antes de publicar reseñas.");
+  const account = (await db.select({ id: customerAccounts.id, name: customerAccounts.name, emailVerified: customerAccounts.emailVerified, phoneVerified: customerAccounts.phoneVerified }).from(customerAccounts).where(eq(customerAccounts.id, accountId)).limit(1))[0];
+  if (!account?.emailVerified && !account?.phoneVerified) throw new Error("Verifica tu correo o teléfono antes de publicar reseñas.");
   const product = (await db.select({ id: products.id }).from(products).where(eq(products.id, productId)).limit(1))[0];
   if (!product) throw new Error("Producto no encontrado.");
   await db.insert(reviews).values({ userId: null, customerName: account.name, productId, rating, comment: comment.trim(), status: "aprobada" });

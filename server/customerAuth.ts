@@ -29,7 +29,7 @@ function publicCustomer(account: typeof customerAccounts.$inferSelect): PublicCu
     name: account.name,
     email: account.email ?? null,
     phone: account.phone ?? null,
-    emailVerified: Boolean(account.emailVerified || account.phoneVerified),
+    emailVerified: Boolean(account.emailVerified),
     phoneVerified: Boolean(account.phoneVerified),
     loyaltyPoints: account.loyaltyPoints ?? 0,
     welcomeCouponCode: account.welcomeCouponCode ?? null,
@@ -88,13 +88,20 @@ async function sendVerificationEmail(email: string, name: string, code: string) 
 }
 
 export function normalizePhone(input: string) {
-  const raw = input.trim().replace(/[\s().-]/g, "");
+  const raw = input.trim();
   if (!raw) throw new Error("Escribe un número de teléfono.");
-  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
-  if (raw.startsWith("+")) return raw;
-  if (/^591\d{8}$/.test(raw)) return `+${raw}`;
-  if (/^\d{8}$/.test(raw)) return `+591${raw}`;
-  throw new Error("Usa un número válido, por ejemplo +591 70000000.");
+  if (!/^[+0-9\s().-]+$/.test(raw)) throw new Error("El teléfono solo puede contener números y separadores comunes.");
+  const compact = raw.replace(/[\s().-]/g, "");
+  const withoutInternationalPrefix = compact.startsWith("00") ? `+${compact.slice(2)}` : compact;
+  const normalized = withoutInternationalPrefix.startsWith("+")
+    ? withoutInternationalPrefix
+    : /^591\d+$/.test(withoutInternationalPrefix)
+      ? `+${withoutInternationalPrefix}`
+      : `+591${withoutInternationalPrefix}`;
+  if (!/^\+591[67]\d{7}$/.test(normalized)) {
+    throw new Error("Escribe un móvil boliviano válido de 8 dígitos, por ejemplo +591 70000000.");
+  }
+  return normalized;
 }
 
 function hasTwilioVerify() {
@@ -292,7 +299,7 @@ export async function logoutCustomer(req: { headers: { cookie?: string } }) {
 export async function listCustomers() {
   const db = await getDb();
   if (!db) return [];
-  return db.select({ id: customerAccounts.id, name: customerAccounts.name, email: customerAccounts.email, phone: customerAccounts.phone, emailVerified: customerAccounts.emailVerified, loyaltyPoints: customerAccounts.loyaltyPoints, createdAt: customerAccounts.createdAt, lastLoginAt: customerAccounts.lastLoginAt }).from(customerAccounts).orderBy(customerAccounts.createdAt);
+  return db.select({ id: customerAccounts.id, name: customerAccounts.name, email: customerAccounts.email, phone: customerAccounts.phone, emailVerified: customerAccounts.emailVerified, phoneVerified: customerAccounts.phoneVerified, loyaltyPoints: customerAccounts.loyaltyPoints, createdAt: customerAccounts.createdAt, lastLoginAt: customerAccounts.lastLoginAt }).from(customerAccounts).orderBy(customerAccounts.createdAt);
 }
 
 export async function updateCustomerByAdmin(input: { id: string; name: string; email?: string; phone?: string; password?: string }) {

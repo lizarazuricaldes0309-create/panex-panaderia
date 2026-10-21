@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
 import { ENV } from "./_core/env";
+import { normalizePhone } from "./customerAuth";
 
 function contextFor(role: "admin" | "user", openId = role === "admin" ? ENV.ownerOpenId : "panex-test-user"): TrpcContext {
   return {
@@ -63,5 +64,20 @@ describe("Panex order validation", () => {
       items: "",
       total: 0,
     })).rejects.toThrow();
+  });
+});
+
+describe("Panex Bolivia phone validation", () => {
+  it("normalizes valid Bolivian mobile numbers", () => {
+    expect(normalizePhone("+591 70000000")).toBe("+59170000000");
+    expect(normalizePhone("70000000")).toBe("+59170000000");
+    expect(normalizePhone("00591-60000000")).toBe("+59160000000");
+  });
+
+  it("rejects non-Bolivian, landline, short, and malformed numbers", () => {
+    expect(() => normalizePhone("+1 5555555555")).toThrow("móvil boliviano");
+    expect(() => normalizePhone("+591 20000000")).toThrow("móvil boliviano");
+    expect(() => normalizePhone("+591 7000000")).toThrow("móvil boliviano");
+    expect(() => normalizePhone("+591 7ABC0000")).toThrow();
   });
 });

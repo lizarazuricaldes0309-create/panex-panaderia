@@ -28,7 +28,7 @@ export default function Admin() {
   const products = productsQuery.data ?? [];
   const orders = ordersQuery.data ?? [];
   const customers = customersQuery.data ?? [];
-  const verifiedCustomers = customers.filter(customer => customer.emailVerified).length;
+  const verifiedCustomers = customers.filter(customer => customer.emailVerified || customer.phoneVerified).length;
   const activeProducts = products.filter(product => product.isActive).length;
   const revenue = orders.filter(order => order.status !== "cancelado").reduce((sum, order) => sum + order.total, 0);
   const visibleProducts = useMemo(() => products.filter(product => `${product.name} ${product.category}`.toLowerCase().includes(search.toLowerCase())), [products, search]);
