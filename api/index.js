@@ -1,5 +1,4 @@
-// api/index.ts
-import "dotenv/config";
+// server/_core/app.ts
 import express from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { SignJWT as SignJWT2 } from "jose";
@@ -237,8 +236,8 @@ async function getReviewsByProduct(productId) {
 async function createCustomerReview(accountId, productId, rating, comment) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  const account = (await db.select({ id: customerAccounts.id, name: customerAccounts.name, emailVerified: customerAccounts.emailVerified }).from(customerAccounts).where(eq(customerAccounts.id, accountId)).limit(1))[0];
-  if (!account?.emailVerified) throw new Error("Verifica tu correo antes de publicar rese\xF1as.");
+  const account = (await db.select({ id: customerAccounts.id, name: customerAccounts.name, emailVerified: customerAccounts.emailVerified, phoneVerified: customerAccounts.phoneVerified }).from(customerAccounts).where(eq(customerAccounts.id, accountId)).limit(1))[0];
+  if (!account?.emailVerified && !account?.phoneVerified) throw new Error("Verifica tu correo o tel\xE9fono antes de publicar rese\xF1as.");
   const product = (await db.select({ id: products.id }).from(products).where(eq(products.id, productId)).limit(1))[0];
   if (!product) throw new Error("Producto no encontrado.");
   await db.insert(reviews).values({ userId: null, customerName: account.name, productId, rating, comment: comment.trim(), status: "aprobada" });
@@ -608,34 +607,6 @@ function registerStorageProxy(app2) {
   });
 }
 
-// server/_core/context.ts
-import { parse as parseCookieHeader3 } from "cookie";
-import { jwtVerify as jwtVerify2 } from "jose";
-var ADMIN_COOKIE = "panex_admin_session";
-async function authenticateAdminCookie(cookieHeader) {
-  if (!cookieHeader || !ENV.cookieSecret) return null;
-  const token = parseCookieHeader3(cookieHeader)[ADMIN_COOKIE];
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify2(token, new TextEncoder().encode(ENV.cookieSecret), { algorithms: ["HS256"] });
-    if (payload.type !== "panex-admin") return null;
-    return { id: "00000000-0000-0000-0000-000000000001", openId: "panex-password-admin", name: "Administrador Panex", email: ENV.ownerEmail, loginMethod: "password", role: "admin", createdAt: /* @__PURE__ */ new Date(0), updatedAt: /* @__PURE__ */ new Date(), lastSignedIn: /* @__PURE__ */ new Date() };
-  } catch {
-    return null;
-  }
-}
-async function createContext(opts) {
-  let user = await authenticateAdminCookie(opts.req.headers.cookie);
-  if (!user) {
-    try {
-      user = await sdk.authenticateRequest(opts.req);
-    } catch {
-      user = null;
-    }
-  }
-  return { req: opts.req, res: opts.res, user };
-}
-
 // server/routers.ts
 import { TRPCError as TRPCError3 } from "@trpc/server";
 import { z as z2 } from "zod";
@@ -796,7 +767,7 @@ function publicCustomer(account) {
     name: account.name,
     email: account.email ?? null,
     phone: account.phone ?? null,
-    emailVerified: Boolean(account.emailVerified || account.phoneVerified),
+    emailVerified: Boolean(account.emailVerified),
     phoneVerified: Boolean(account.phoneVerified),
     loyaltyPoints: account.loyaltyPoints ?? 0,
     welcomeCouponCode: account.welcomeCouponCode ?? null,
@@ -847,13 +818,16 @@ async function sendVerificationEmail(email, name, code) {
   }
 }
 function normalizePhone(input) {
-  const raw = input.trim().replace(/[\s().-]/g, "");
+  const raw = input.trim();
   if (!raw) throw new Error("Escribe un n\xFAmero de tel\xE9fono.");
-  if (raw.startsWith("00")) return `+${raw.slice(2)}`;
-  if (raw.startsWith("+")) return raw;
-  if (/^591\d{8}$/.test(raw)) return `+${raw}`;
-  if (/^\d{8}$/.test(raw)) return `+591${raw}`;
-  throw new Error("Usa un n\xFAmero v\xE1lido, por ejemplo +591 70000000.");
+  if (!/^[+0-9\s().-]+$/.test(raw)) throw new Error("El tel\xE9fono solo puede contener n\xFAmeros y separadores comunes.");
+  const compact = raw.replace(/[\s().-]/g, "");
+  const withoutInternationalPrefix = compact.startsWith("00") ? `+${compact.slice(2)}` : compact;
+  const normalized = withoutInternationalPrefix.startsWith("+") ? withoutInternationalPrefix : /^591\d+$/.test(withoutInternationalPrefix) ? `+${withoutInternationalPrefix}` : `+591${withoutInternationalPrefix}`;
+  if (!/^\+591[67]\d{7}$/.test(normalized)) {
+    throw new Error("Escribe un m\xF3vil boliviano v\xE1lido de 8 d\xEDgitos, por ejemplo +591 70000000.");
+  }
+  return normalized;
 }
 function hasTwilioVerify() {
   return Boolean(ENV.twilioAccountSid && ENV.twilioAuthToken && ENV.twilioVerifyServiceSid);
@@ -909,6 +883,14 @@ async function issueVerification(account) {
   await db.update(customerAccounts).set({ verificationCodeHash: tokenHash(code), verificationExpiresAt: verificationExpiry(), verificationAttempts: 0 }).where(eq2(customerAccounts.id, account.id));
   await sendVerificationEmail(account.email, account.name, code);
 }
+async function activatePhoneAccount(accountId) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  await db.update(customerAccounts).set({ phoneVerified: true, verificationCodeHash: null, verificationExpiresAt: null, verificationAttempts: 0, loyaltyPoints: 100, welcomeCouponCode: couponCode() }).where(eq2(customerAccounts.id, accountId));
+  const activated = (await db.select().from(customerAccounts).where(eq2(customerAccounts.id, accountId)).limit(1))[0];
+  if (!activated) throw new Error("No se pudo activar la cuenta.");
+  return { customer: publicCustomer(activated), token: await createSession(activated.id) };
+}
 async function registerCustomer(input) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -918,10 +900,7 @@ async function registerCustomer(input) {
   const existing = email ? (await db.select().from(customerAccounts).where(eq2(customerAccounts.email, email)).limit(1))[0] : (await db.select().from(customerAccounts).where(eq2(customerAccounts.phone, phone)).limit(1))[0];
   if (existing) {
     if (existing.emailVerified || existing.phoneVerified) throw new Error(email ? "Ya existe una cuenta con ese correo." : "Ya existe una cuenta con ese tel\xE9fono.");
-    if (phone) {
-      await sendPhoneVerification(phone);
-      return { requiresVerification: true, verificationMethod: "phone", phone };
-    }
+    if (phone) return activatePhoneAccount(existing.id);
     if (!ENV.resendApiKey || !ENV.resendFromEmail) throw new Error("La verificaci\xF3n por correo no est\xE1 configurada.");
     await issueVerification(existing);
     return { requiresVerification: true, verificationMethod: "email", email };
@@ -931,10 +910,7 @@ async function registerCustomer(input) {
   if (!id) throw new Error("No se pudo crear la cuenta.");
   const account = (await db.select().from(customerAccounts).where(eq2(customerAccounts.id, id)).limit(1))[0];
   if (!account) throw new Error("No se pudo crear la cuenta.");
-  if (phone) {
-    await sendPhoneVerification(phone);
-    return { requiresVerification: true, verificationMethod: "phone", phone };
-  }
+  if (phone) return activatePhoneAccount(account.id);
   if (!ENV.resendApiKey || !ENV.resendFromEmail) throw new Error("La verificaci\xF3n por correo no est\xE1 configurada.");
   await issueVerification(account);
   return { requiresVerification: true, verificationMethod: "email", email };
@@ -1021,7 +997,7 @@ async function logoutCustomer(req) {
 async function listCustomers() {
   const db = await getDb();
   if (!db) return [];
-  return db.select({ id: customerAccounts.id, name: customerAccounts.name, email: customerAccounts.email, phone: customerAccounts.phone, emailVerified: customerAccounts.emailVerified, loyaltyPoints: customerAccounts.loyaltyPoints, createdAt: customerAccounts.createdAt, lastLoginAt: customerAccounts.lastLoginAt }).from(customerAccounts).orderBy(customerAccounts.createdAt);
+  return db.select({ id: customerAccounts.id, name: customerAccounts.name, email: customerAccounts.email, phone: customerAccounts.phone, emailVerified: customerAccounts.emailVerified, phoneVerified: customerAccounts.phoneVerified, loyaltyPoints: customerAccounts.loyaltyPoints, createdAt: customerAccounts.createdAt, lastLoginAt: customerAccounts.lastLoginAt }).from(customerAccounts).orderBy(customerAccounts.createdAt);
 }
 async function updateCustomerByAdmin(input) {
   const db = await getDb();
@@ -1221,7 +1197,35 @@ var appRouter = router({
   })
 });
 
-// api/index.ts
+// server/_core/context.ts
+import { parse as parseCookieHeader3 } from "cookie";
+import { jwtVerify as jwtVerify2 } from "jose";
+var ADMIN_COOKIE = "panex_admin_session";
+async function authenticateAdminCookie(cookieHeader) {
+  if (!cookieHeader || !ENV.cookieSecret) return null;
+  const token = parseCookieHeader3(cookieHeader)[ADMIN_COOKIE];
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify2(token, new TextEncoder().encode(ENV.cookieSecret), { algorithms: ["HS256"] });
+    if (payload.type !== "panex-admin") return null;
+    return { id: "00000000-0000-0000-0000-000000000001", openId: "panex-password-admin", name: "Administrador Panex", email: ENV.ownerEmail, loginMethod: "password", role: "admin", createdAt: /* @__PURE__ */ new Date(0), updatedAt: /* @__PURE__ */ new Date(), lastSignedIn: /* @__PURE__ */ new Date() };
+  } catch {
+    return null;
+  }
+}
+async function createContext(opts) {
+  let user = await authenticateAdminCookie(opts.req.headers.cookie);
+  if (!user) {
+    try {
+      user = await sdk.authenticateRequest(opts.req);
+    } catch {
+      user = null;
+    }
+  }
+  return { req: opts.req, res: opts.res, user };
+}
+
+// server/_core/app.ts
 var ADMIN_COOKIE2 = "panex_admin_session";
 function createApiApp() {
   const app2 = express();
@@ -1246,6 +1250,8 @@ function createApiApp() {
   app2.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
   return app2;
 }
+
+// api/index.ts
 var app = createApiApp();
 function handler(req, res) {
   process.env.NODE_ENV = "production";
