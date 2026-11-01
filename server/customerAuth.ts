@@ -197,7 +197,10 @@ export async function registerCustomer(input: { name: string; email?: string; ph
     : (await db.select().from(customerAccounts).where(eq(customerAccounts.phone, phone!)).limit(1))[0];
   if (existing) {
     if (existing.emailVerified || existing.phoneVerified) throw new Error(email ? "Ya existe una cuenta con ese correo." : "Ya existe una cuenta con ese teléfono.");
-    if (phone) return activatePhoneAccount(existing.id);
+    if (phone) {
+      await db.update(customerAccounts).set({ name: input.name.trim(), passwordHash: hashPassword(input.password) }).where(eq(customerAccounts.id, existing.id));
+      return activatePhoneAccount(existing.id);
+    }
     if (!ENV.resendApiKey || !ENV.resendFromEmail) throw new Error("La verificación por correo no está configurada.");
     await issueVerification(existing);
     return { requiresVerification: true as const, verificationMethod: "email" as const, email };

@@ -900,7 +900,10 @@ async function registerCustomer(input) {
   const existing = email ? (await db.select().from(customerAccounts).where(eq2(customerAccounts.email, email)).limit(1))[0] : (await db.select().from(customerAccounts).where(eq2(customerAccounts.phone, phone)).limit(1))[0];
   if (existing) {
     if (existing.emailVerified || existing.phoneVerified) throw new Error(email ? "Ya existe una cuenta con ese correo." : "Ya existe una cuenta con ese tel\xE9fono.");
-    if (phone) return activatePhoneAccount(existing.id);
+    if (phone) {
+      await db.update(customerAccounts).set({ name: input.name.trim(), passwordHash: hashPassword(input.password) }).where(eq2(customerAccounts.id, existing.id));
+      return activatePhoneAccount(existing.id);
+    }
     if (!ENV.resendApiKey || !ENV.resendFromEmail) throw new Error("La verificaci\xF3n por correo no est\xE1 configurada.");
     await issueVerification(existing);
     return { requiresVerification: true, verificationMethod: "email", email };
