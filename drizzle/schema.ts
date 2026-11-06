@@ -89,6 +89,17 @@ export const reviews = pgTable("reviews", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+export const storeReviews = pgTable("panex_store_reviews", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  customerId: uuid("customer_id").notNull(),
+  customerName: text("customer_name").notNull(),
+  rating: integer("rating").notNull(),
+  comment: text("comment").notNull(),
+  status: text("status").default("aprobada").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 export type Product = typeof products.$inferSelect;
@@ -97,3 +108,4 @@ export type Order = typeof orders.$inferInsert;
 export type CustomerAccount = typeof customerAccounts.$inferSelect;
 export type CustomerSession = typeof customerSessions.$inferSelect;
 export type Review = typeof reviews.$inferSelect;
+export type StoreReview = typeof storeReviews.$inferSelect;

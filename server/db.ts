@@ -1,7 +1,7 @@
 import { and, desc, eq, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { randomUUID } from "node:crypto";
-import { InsertUser, categories, customerAccounts, orders, products, reviews, users } from "../drizzle/schema";
+import { InsertUser, categories, customerAccounts, orders, products, reviews, storeReviews, users } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -117,5 +117,27 @@ export async function createCustomerReview(accountId: string, productId: string,
   const product = (await db.select({ id: products.id }).from(products).where(eq(products.id, productId)).limit(1))[0];
   if (!product) throw new Error("Producto no encontrado.");
   await db.insert(reviews).values({ userId: null, customerName: account.name, productId, rating, comment: comment.trim(), status: "aprobada" });
+  return { success: true } as const;
+}
+
+export async function getStoreReviews() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ id: storeReviews.id, customerName: storeReviews.customerName, rating: storeReviews.rating, comment: storeReviews.comment, status: storeReviews.status, createdAt: storeReviews.createdAt })
+    .from(storeReviews).where(or(eq(storeReviews.status, "aprobada"), eq(storeReviews.status, "approved"))).orderBy(desc(storeReviews.createdAt));
+}
+
+export async function getAllStoreReviews() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(storeReviews).orderBy(desc(storeReviews.createdAt));
+}
+
+export async function createStoreReview(accountId: string, rating: number, comment: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const account = (await db.select({ id: customerAccounts.id, name: customerAccounts.name, emailVerified: customerAccounts.emailVerified, phoneVerified: customerAccounts.phoneVerified }).from(customerAccounts).where(eq(customerAccounts.id, accountId)).limit(1))[0];
+  if (!account?.emailVerified && !account?.phoneVerified) throw new Error("Verifica tu correo o teléfono antes de publicar opiniones.");
+  await db.insert(storeReviews).values({ customerId: account.id, customerName: account.name, rating, comment: comment.trim(), status: "aprobada" });
   return { success: true } as const;
 }

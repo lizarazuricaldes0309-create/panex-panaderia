@@ -5,7 +5,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { ENV } from "./_core/env";
-import { createCustomerReview, deleteProductById, getActiveProducts, getAllOrders, getAllProducts, getReviewsByProduct, insertOrder, insertProduct, updateProductById } from "./db";
+import { createCustomerReview, createStoreReview, deleteProductById, getActiveProducts, getAllOrders, getAllProducts, getAllStoreReviews, getReviewsByProduct, getStoreReviews, insertOrder, insertProduct, updateProductById } from "./db";
 import { clearCustomerCookie, deleteCustomerByAdmin, getCustomerFromRequest, listCustomers, loginCustomer, logoutCustomer, registerCustomer, resendPhoneVerification, resendVerification, setCustomerCookie, updateCustomerByAdmin, verifyCustomerEmail, verifyCustomerPhone } from "./customerAuth";
 
 const productInput = z.object({
@@ -110,9 +110,19 @@ export const appRouter = router({
     list: publicProcedure.input(z.object({ productId: z.string().uuid() })).query(({ input }) => getReviewsByProduct(input.productId)),
     create: publicProcedure.input(z.object({ productId: z.string().uuid(), rating: z.number().int().min(1).max(5), comment: z.string().trim().min(8).max(500) })).mutation(async ({ ctx, input }) => {
       const customer = await getCustomerFromRequest(ctx.req);
-      if (!customer) throw new TRPCError({ code: "UNAUTHORIZED", message: "Verifica tu correo e inicia sesión para publicar reseñas." });
+      if (!customer) throw new TRPCError({ code: "UNAUTHORIZED", message: "Verifica tu correo o teléfono e inicia sesión para publicar reseñas." });
       try { return await createCustomerReview(customer.id, input.productId, input.rating, input.comment); }
       catch (error) { throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo publicar la reseña." }); }
+    }),
+  }),
+  storeReviews: router({
+    list: publicProcedure.query(() => getStoreReviews()),
+    adminList: adminProcedure.query(() => getAllStoreReviews()),
+    create: publicProcedure.input(z.object({ rating: z.number().int().min(1).max(5), comment: z.string().trim().min(8).max(500) })).mutation(async ({ ctx, input }) => {
+      const customer = await getCustomerFromRequest(ctx.req);
+      if (!customer) throw new TRPCError({ code: "UNAUTHORIZED", message: "Verifica tu correo o teléfono e inicia sesión para publicar una opinión." });
+      try { return await createStoreReview(customer.id, input.rating, input.comment); }
+      catch (error) { throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo publicar la opinión." }); }
     }),
   }),
   products: router({

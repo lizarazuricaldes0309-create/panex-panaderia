@@ -117,6 +117,16 @@ var reviews = pgTable("reviews", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
 });
+var storeReviews = pgTable("panex_store_reviews", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  customerId: uuid("customer_id").notNull(),
+  customerName: text("customer_name").notNull(),
+  rating: integer("rating").notNull(),
+  comment: text("comment").notNull(),
+  status: text("status").default("aprobada").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+});
 
 // server/_core/env.ts
 var ENV = {
@@ -241,6 +251,24 @@ async function createCustomerReview(accountId, productId, rating, comment) {
   const product = (await db.select({ id: products.id }).from(products).where(eq(products.id, productId)).limit(1))[0];
   if (!product) throw new Error("Producto no encontrado.");
   await db.insert(reviews).values({ userId: null, customerName: account.name, productId, rating, comment: comment.trim(), status: "aprobada" });
+  return { success: true };
+}
+async function getStoreReviews() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ id: storeReviews.id, customerName: storeReviews.customerName, rating: storeReviews.rating, comment: storeReviews.comment, status: storeReviews.status, createdAt: storeReviews.createdAt }).from(storeReviews).where(or(eq(storeReviews.status, "aprobada"), eq(storeReviews.status, "approved"))).orderBy(desc(storeReviews.createdAt));
+}
+async function getAllStoreReviews() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(storeReviews).orderBy(desc(storeReviews.createdAt));
+}
+async function createStoreReview(accountId, rating, comment) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const account = (await db.select({ id: customerAccounts.id, name: customerAccounts.name, emailVerified: customerAccounts.emailVerified, phoneVerified: customerAccounts.phoneVerified }).from(customerAccounts).where(eq(customerAccounts.id, accountId)).limit(1))[0];
+  if (!account?.emailVerified && !account?.phoneVerified) throw new Error("Verifica tu correo o tel\xE9fono antes de publicar opiniones.");
+  await db.insert(storeReviews).values({ customerId: account.id, customerName: account.name, rating, comment: comment.trim(), status: "aprobada" });
   return { success: true };
 }
 
@@ -1158,11 +1186,24 @@ var appRouter = router({
     list: publicProcedure.input(z2.object({ productId: z2.string().uuid() })).query(({ input }) => getReviewsByProduct(input.productId)),
     create: publicProcedure.input(z2.object({ productId: z2.string().uuid(), rating: z2.number().int().min(1).max(5), comment: z2.string().trim().min(8).max(500) })).mutation(async ({ ctx, input }) => {
       const customer = await getCustomerFromRequest(ctx.req);
-      if (!customer) throw new TRPCError3({ code: "UNAUTHORIZED", message: "Verifica tu correo e inicia sesi\xF3n para publicar rese\xF1as." });
+      if (!customer) throw new TRPCError3({ code: "UNAUTHORIZED", message: "Verifica tu correo o tel\xE9fono e inicia sesi\xF3n para publicar rese\xF1as." });
       try {
         return await createCustomerReview(customer.id, input.productId, input.rating, input.comment);
       } catch (error) {
         throw new TRPCError3({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo publicar la rese\xF1a." });
+      }
+    })
+  }),
+  storeReviews: router({
+    list: publicProcedure.query(() => getStoreReviews()),
+    adminList: adminProcedure2.query(() => getAllStoreReviews()),
+    create: publicProcedure.input(z2.object({ rating: z2.number().int().min(1).max(5), comment: z2.string().trim().min(8).max(500) })).mutation(async ({ ctx, input }) => {
+      const customer = await getCustomerFromRequest(ctx.req);
+      if (!customer) throw new TRPCError3({ code: "UNAUTHORIZED", message: "Verifica tu correo o tel\xE9fono e inicia sesi\xF3n para publicar una opini\xF3n." });
+      try {
+        return await createStoreReview(customer.id, input.rating, input.comment);
+      } catch (error) {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "No se pudo publicar la opini\xF3n." });
       }
     })
   }),
